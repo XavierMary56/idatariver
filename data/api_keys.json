@@ -1,0 +1,14 @@
+{
+  "keys": [
+    {
+      "key": "demo-basic-key",
+      "plan": "basic",
+      "rate_limit_per_minute": 30
+    },
+    {
+      "key": "demo-pro-key",
+      "plan": "pro",
+      "rate_limit_per_minute": 120
+    }
+  ]
+}
