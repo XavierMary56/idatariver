@@ -8,30 +8,35 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"idatariver-finapi/internal/repo"
 )
 
 type APIService struct {
-	DB *pgxpool.Pool
+	DB          *pgxpool.Pool
+	Instruments *repo.InstrumentRepo
+	Market      *repo.MarketRepo
+	HealthData  *repo.HealthDataRepo
 }
+
+const maxCompareSymbols = 20
 
 func (s *APIService) InstrumentID(ctx context.Context, symbol string) (int64, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return 0, errors.New("missing symbol")
 	}
-	const q = `select id from instrument where symbol=$1 and active=true limit 1;`
-	var id int64
-	if err := s.DB.QueryRow(ctx, q, symbol).Scan(&id); err != nil {
-		return 0, err
+	if s.Instruments == nil {
+		return 0, errors.New("instrument repo not configured")
 	}
-	return id, nil
+	return s.Instruments.InstrumentID(ctx, symbol)
 }
 
 type LatestCompareItem struct {
-	Symbol      string  `json:"symbol"`
-	MetricsDate string  `json:"metrics_date,omitempty"`
+	Symbol      string   `json:"symbol"`
+	MetricsDate string   `json:"metrics_date,omitempty"`
 	Close       *float64 `json:"close,omitempty"`
-	CloseTS     string  `json:"close_ts,omitempty"`
+	CloseTS     string   `json:"close_ts,omitempty"`
 
 	Ret1D   *float64 `json:"ret_1d_pct,omitempty"`
 	Ret5D   *float64 `json:"ret_5d_pct,omitempty"`
@@ -54,28 +59,44 @@ func isAllowedSortKey(k string) bool {
 func sortValue(it LatestCompareItem, sortBy string) (float64, bool) {
 	switch sortBy {
 	case "close":
-		if it.Close == nil { return 0, false }
+		if it.Close == nil {
+			return 0, false
+		}
 		return *it.Close, true
 	case "ret_1d":
-		if it.Ret1D == nil { return 0, false }
+		if it.Ret1D == nil {
+			return 0, false
+		}
 		return *it.Ret1D, true
 	case "ret_5d":
-		if it.Ret5D == nil { return 0, false }
+		if it.Ret5D == nil {
+			return 0, false
+		}
 		return *it.Ret5D, true
 	case "ret_20d":
-		if it.Ret20D == nil { return 0, false }
+		if it.Ret20D == nil {
+			return 0, false
+		}
 		return *it.Ret20D, true
 	case "ma_20":
-		if it.MA20 == nil { return 0, false }
+		if it.MA20 == nil {
+			return 0, false
+		}
 		return *it.MA20, true
 	case "ma_60":
-		if it.MA60 == nil { return 0, false }
+		if it.MA60 == nil {
+			return 0, false
+		}
 		return *it.MA60, true
 	case "vol_20d":
-		if it.Vol20D == nil { return 0, false }
+		if it.Vol20D == nil {
+			return 0, false
+		}
 		return *it.Vol20D, true
 	case "mdd_252d":
-		if it.MDD252D == nil { return 0, false }
+		if it.MDD252D == nil {
+			return 0, false
+		}
 		return *it.MDD252D, true
 	default:
 		return 0, false
@@ -110,7 +131,9 @@ func AvailableFieldMeta() []FieldMeta {
 
 func NormalizeFieldName(s string) string {
 	x := strings.TrimSpace(strings.ToLower(s))
-	if x == "" { return "" }
+	if x == "" {
+		return ""
+	}
 	switch x {
 	case "symbol", "sym":
 		return "symbol"
@@ -139,38 +162,87 @@ func NormalizeFieldName(s string) string {
 	}
 }
 
-// Compare latest with strict fields.
-func (s *APIService) CompareLatest(ctx context.Context, symbols []string, fields []string, includeClose bool, sortBy string, order string) ([]LatestCompareItem, error) {
-	if len(symbols) == 0 { return nil, errors.New("missing symbols") }
-	if len(symbols) > 20 { return nil, errors.New("too many symbols (max 20)") }
+func normalizeSortBy(sortBy string) (string, error) {
+	sortBy = NormalizeFieldName(sortBy)
+	if sortBy == "" || sortBy == "metrics_date" {
+		sortBy = "symbol"
+	}
+	if !isAllowedSortKey(sortBy) {
+		return "", errors.New("invalid sort_by")
+	}
+	return sortBy, nil
+}
 
+func normalizeOrder(order string) (string, error) {
+	order = strings.TrimSpace(strings.ToLower(order))
+	if order == "" {
+		return "desc", nil
+	}
+	if order != "asc" && order != "desc" {
+		return "", errors.New("invalid order (asc|desc)")
+	}
+	return order, nil
+}
+
+func buildWantedFields(fields []string) (map[string]struct{}, bool) {
 	needAll := len(fields) == 0
 	want := map[string]struct{}{}
 	for _, f := range fields {
-		nf := NormalizeFieldName(f)
-		if nf != "" { want[nf] = struct{}{} }
+		if nf := NormalizeFieldName(f); nf != "" {
+			want[nf] = struct{}{}
+		}
+	}
+	return want, needAll
+}
+
+func shouldIncludeField(needAll bool, want map[string]struct{}, key string) bool {
+	if needAll {
+		return true
+	}
+	_, ok := want[key]
+	return ok
+}
+
+func normalizeSymbol(sym string) string {
+	return strings.ToUpper(strings.TrimSpace(sym))
+}
+
+// Compare latest with strict fields.
+func (s *APIService) CompareLatest(ctx context.Context, symbols []string, fields []string, includeClose bool, sortBy string, order string) ([]LatestCompareItem, error) {
+	if len(symbols) == 0 {
+		return nil, errors.New("missing symbols")
+	}
+	if len(symbols) > maxCompareSymbols {
+		return nil, errors.New("too many symbols (max 20)")
+	}
+	if s.Market == nil || s.Instruments == nil {
+		return nil, errors.New("repos not configured")
 	}
 
-	sortBy = NormalizeFieldName(sortBy)
-	if sortBy == "" { sortBy = "symbol" }
-	if sortBy == "metrics_date" { sortBy = "symbol" }
-	order = strings.TrimSpace(strings.ToLower(order))
-	if order == "" { order = "desc" }
-	if order != "asc" && order != "desc" { return nil, errors.New("invalid order (asc|desc)") }
-	if !isAllowedSortKey(sortBy) { return nil, errors.New("invalid sort_by") }
+	want, needAll := buildWantedFields(fields)
+
+	var err error
+	sortBy, err = normalizeSortBy(sortBy)
+	if err != nil {
+		return nil, err
+	}
+	order, err = normalizeOrder(order)
+	if err != nil {
+		return nil, err
+	}
 
 	out := make([]LatestCompareItem, 0, len(symbols))
 	for _, sym := range symbols {
 		id, err := s.InstrumentID(ctx, sym)
-		if err != nil { return nil, errors.New("unknown symbol: "+sym) }
-		item := LatestCompareItem{Symbol: strings.ToUpper(strings.TrimSpace(sym))}
+		if err != nil {
+			return nil, errors.New("unknown symbol: " + sym)
+		}
+		item := LatestCompareItem{Symbol: normalizeSymbol(sym)}
 
 		needCloseForSort := (sortBy == "close")
 		if includeClose || needCloseForSort {
-			const q = `select ts, close from ts_point where instrument_id=$1 and close is not null order by ts desc limit 1;`
-			var ts time.Time
-			var close float64
-			if err := s.DB.QueryRow(ctx, q, id).Scan(&ts, &close); err == nil {
+			ts, close, ok, err := s.Market.LatestClose(ctx, id)
+			if err == nil && ok {
 				v := close
 				item.Close = &v
 				if includeClose {
@@ -180,41 +252,48 @@ func (s *APIService) CompareLatest(ctx context.Context, symbols []string, fields
 		}
 
 		{
-			const q = `
-select d, ret_1d, ret_5d, ret_20d, ma_20, ma_60, vol_20d, max_drawdown_252d
-from daily_metrics
-where instrument_id=$1
-order by d desc
-limit 1;`
-			var d time.Time
-			var r1, r5, r20, ma20, ma60, vol, mdd *float64
-			if err := s.DB.QueryRow(ctx, q, id).Scan(&d, &r1, &r5, &r20, &ma20, &ma60, &vol, &mdd); err == nil {
-				item.MetricsDate = d.UTC().Format("2006-01-02")
-				item.Ret1D, item.Ret5D, item.Ret20D = r1, r5, r20
-				item.MA20, item.MA60 = ma20, ma60
-				item.Vol20D, item.MDD252D = vol, mdd
+			row, err := s.Market.LatestMetrics(ctx, id)
+			if err == nil && row != nil {
+				item.MetricsDate = row.Date.UTC().Format("2006-01-02")
+				item.Ret1D, item.Ret5D, item.Ret20D = row.Ret1D, row.Ret5D, row.Ret20D
+				item.MA20, item.MA60 = row.MA20, row.MA60
+				item.Vol20D, item.MDD252D = row.Vol20D, row.MDD252D
 			}
 		}
 
-		if !includeClose { item.CloseTS = "" }
+		if !includeClose {
+			item.CloseTS = ""
+		}
 		out = append(out, item)
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
 		if sortBy == "symbol" {
-			if order == "asc" { return out[i].Symbol < out[j].Symbol }
+			if order == "asc" {
+				return out[i].Symbol < out[j].Symbol
+			}
 			return out[i].Symbol > out[j].Symbol
 		}
 		ai, aok := sortValue(out[i], sortBy)
 		bj, bok := sortValue(out[j], sortBy)
-		if !aok && !bok { return out[i].Symbol < out[j].Symbol }
-		if !aok { return false }
-		if !bok { return true }
+		if !aok && !bok {
+			return out[i].Symbol < out[j].Symbol
+		}
+		if !aok {
+			return false
+		}
+		if !bok {
+			return true
+		}
 		if order == "asc" {
-			if ai == bj { return out[i].Symbol < out[j].Symbol }
+			if ai == bj {
+				return out[i].Symbol < out[j].Symbol
+			}
 			return ai < bj
 		}
-		if ai == bj { return out[i].Symbol < out[j].Symbol }
+		if ai == bj {
+			return out[i].Symbol < out[j].Symbol
+		}
 		return ai > bj
 	})
 
@@ -224,19 +303,39 @@ limit 1;`
 			out[i].Close = nil
 			out[i].CloseTS = ""
 		} else if !needAll {
-			if _, ok := want["close"]; !ok { out[i].Close = nil }
-			if _, ok := want["close_ts"]; !ok { out[i].CloseTS = "" }
+			if !shouldIncludeField(needAll, want, "close") {
+				out[i].Close = nil
+			}
+			if !shouldIncludeField(needAll, want, "close_ts") {
+				out[i].CloseTS = ""
+			}
 		}
 
 		if !needAll {
-			if _, ok := want["metrics_date"]; !ok { out[i].MetricsDate = "" }
-			if _, ok := want["ret_1d"]; !ok { out[i].Ret1D = nil }
-			if _, ok := want["ret_5d"]; !ok { out[i].Ret5D = nil }
-			if _, ok := want["ret_20d"]; !ok { out[i].Ret20D = nil }
-			if _, ok := want["ma_20"]; !ok { out[i].MA20 = nil }
-			if _, ok := want["ma_60"]; !ok { out[i].MA60 = nil }
-			if _, ok := want["vol_20d"]; !ok { out[i].Vol20D = nil }
-			if _, ok := want["mdd_252d"]; !ok { out[i].MDD252D = nil }
+			if !shouldIncludeField(needAll, want, "metrics_date") {
+				out[i].MetricsDate = ""
+			}
+			if !shouldIncludeField(needAll, want, "ret_1d") {
+				out[i].Ret1D = nil
+			}
+			if !shouldIncludeField(needAll, want, "ret_5d") {
+				out[i].Ret5D = nil
+			}
+			if !shouldIncludeField(needAll, want, "ret_20d") {
+				out[i].Ret20D = nil
+			}
+			if !shouldIncludeField(needAll, want, "ma_20") {
+				out[i].MA20 = nil
+			}
+			if !shouldIncludeField(needAll, want, "ma_60") {
+				out[i].MA60 = nil
+			}
+			if !shouldIncludeField(needAll, want, "vol_20d") {
+				out[i].Vol20D = nil
+			}
+			if !shouldIncludeField(needAll, want, "mdd_252d") {
+				out[i].MDD252D = nil
+			}
 		}
 	}
 

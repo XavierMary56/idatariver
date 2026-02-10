@@ -18,14 +18,16 @@ func main() {
 	ctx := context.Background()
 	dsn := util.Getenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/idatariver?sslmode=disable")
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer pool.Close()
 
 	jobRunRepo := repo.NewJobRunRepo(pool)
 	tenantRepo := repo.NewTenantRepo(pool)
 	notifyRepo := repo.NewNotifyRepo(pool)
 	healthRepo := repo.NewHealthRepo(pool)
-	apiSvc := &service.APIService{DB: pool}
+	apiSvc := service.NewAPIService(pool)
 
 	healthJob := &jobs.HealthCheckJob{
 		JobRunRepo: jobRunRepo,
@@ -42,7 +44,9 @@ func main() {
 		_ = healthJob.RunAllTenants(context.Background())
 		log.Println("[cron] health_check_all done")
 	})
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 
 	c.Start()
 	log.Printf("worker started (cron=%s)\n", spec)

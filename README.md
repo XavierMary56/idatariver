@@ -11,3 +11,17 @@ See:
 - docs/DEPLOY.md
 - docs/API.md
 - docs/TESTS.md
+
+## Dev mode (faster restart)
+
+Run Go code directly with source mounted:
+
+```bash
+docker compose --profile dev up --build
+```
+
+If you only want API + worker in dev mode:
+
+```bash
+docker compose --profile dev up api-dev worker-dev
+```

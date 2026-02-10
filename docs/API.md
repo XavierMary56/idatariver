@@ -6,6 +6,10 @@ Authentication:
 - User endpoints: header `X-API-Key: <key>`
 - Admin endpoints: header `X-Admin-Key: <key>`
 
+Error responses:
+- JSON body: `{ "error": "message" }`
+- Status: `4xx` for validation/auth, `5xx` for server errors
+
 Seed demo keys:
 - `devkey` (user)
 - `adminkey` (admin)

@@ -9,7 +9,8 @@ insert into instrument(symbol, type, name, currency) values
  ('NASDAQ','index','NASDAQ 100','USD'),
  ('US10Y','rate','US 10Y Treasury Yield','USD'),
  ('US2Y','rate','US 2Y Treasury Yield','USD'),
- ('USD_CNY','fx','USD/CNY','CNY')
+ ('USD_CNY','fx','USD/CNY','CNY'),
+ ('BAD','index','Bad Example Index','USD')
 on conflict (symbol) do nothing;
 
 -- Example mappings

@@ -107,5 +107,14 @@ Update (enable webhook):
 ```bash
 curl -X PUT -H 'X-Admin-Key: adminkey' -H 'Content-Type: application/json' \
   -d '{"enabled":true,"webhook_urls":["https://example.com/webhook"],"telegram_bot_token":"","telegram_chat_id":"","cooldown_min":180}' \
+
+## Go tests
+
+Run all tests:
+
+```bash
+go test ./...
+```
+
   'http://localhost:8080/api/v1/admin/notify'
 ```
